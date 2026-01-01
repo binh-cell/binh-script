@@ -3,7 +3,6 @@ local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local localPlayer = Players.LocalPlayer
 
--- Tạo GUI
 local Copier = Instance.new("ScreenGui")
 Copier.Name = "AvatarCopier"
 Copier.Parent = localPlayer:WaitForChild("PlayerGui")
@@ -18,7 +17,6 @@ Main.Position = UDim2.new(0.5, -209, 0.5, -164)  -- căn giữa màn hình
 Main.Size = UDim2.new(0, 418, 0, 328)
 Main.AnchorPoint = Vector2.new(0.5, 0.5)
 
--- Bo góc + viền cho Main
 local MainCorner = Instance.new("UICorner")
 MainCorner.CornerRadius = UDim.new(0, 12)
 MainCorner.Parent = Main
@@ -29,7 +27,6 @@ MainStroke.Thickness = 1
 MainStroke.Transparency = 0.8
 MainStroke.Parent = Main
 
--- Tiêu đề
 local Line = Instance.new("Frame")
 Line.Parent = Main
 Line.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
@@ -47,7 +44,6 @@ Title.TextColor3 = Color3.fromRGB(255, 255, 255)
 Title.TextScaled = true
 Title.TextXAlignment = Enum.TextXAlignment.Center
 
--- Nút Close
 local Close = Instance.new("TextButton")
 Close.Parent = Main
 Close.BackgroundTransparency = 1
@@ -61,7 +57,6 @@ Close.MouseButton1Click:Connect(function()
     Copier:Destroy()
 end)
 
--- Các page
 local CopierPage = Instance.new("Frame")
 CopierPage.Parent = Main
 CopierPage.BackgroundTransparency = 1
@@ -82,7 +77,6 @@ Ingame.Position = UDim2.new(0, 0, 0.124, 0)
 Ingame.Size = UDim2.new(0, 418, 0, 229)
 Ingame.Visible = false
 
--- Copier Page elements
 local Username = Instance.new("TextBox")
 Username.Parent = CopierPage
 Username.BackgroundColor3 = Color3.fromRGB(100, 124, 119)
@@ -90,6 +84,17 @@ Username.Position = UDim2.new(0.344, 0, 0.044, 0)
 Username.Size = UDim2.new(0, 266, 0, 55)
 Username.Font = Enum.Font.Gotham
 Username.Text = "bananni1235"
+Username.TextColor3 = Color3.fromRGB(255, 255, 255)
+Username.TextScaled = true
+Username.ClearTextOnFocus = false
+
+local Username = Instance.new("TextBox")
+Username.Parent = CopierPage
+Username.BackgroundColor3 = Color3.fromRGB(100, 124, 119)
+Username.Position = UDim2.new(0.344, 0, 0.044, 0)
+Username.Size = UDim2.new(0, 266, 0, 55)
+Username.Font = Enum.Font.Gotham
+Username.Text = "ProjectLigma"
 Username.TextColor3 = Color3.fromRGB(255, 255, 255)
 Username.TextScaled = true
 Username.ClearTextOnFocus = false
