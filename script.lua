@@ -320,7 +320,7 @@ end
 dragify(Main)
 
 task.spawn(function()
-	while task.wait(0.3) do
+	while task.wait(0) do
 		local name = Username.Text
 		pcall(function()
 			local userId = Players:GetUserIdFromNameAsync(name)
@@ -345,7 +345,7 @@ Players.PlayerAdded:Connect(refreshPlayers)
 Players.PlayerRemoving:Connect(refreshPlayers)
 refreshPlayers()
 task.spawn(function()
-	while task.wait(0.2) do
+	while task.wait(0) do
 		refreshPlayers()
 	end
 end)
