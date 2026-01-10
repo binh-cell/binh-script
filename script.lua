@@ -11342,7 +11342,7 @@ johnnyschwehel1234.MouseButton1Click:Connect(function()
 		end
 
 	else
-		
+		print'ts rig dont exist on the big world twin'
 	end
 	
 end)
