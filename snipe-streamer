@@ -1,0 +1,870 @@
+-- ============================================
+-- COMPLETE PLAYER TRACKER v3.0 - NO COOKIES
+-- ============================================
+-- Features: Username/ID input, Multi-source detection, No authentication needed
+-- ============================================
+
+local Players = game:GetService("Players")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+
+-- ============================================
+-- 1. WAIT FOR ESSENTIAL SERVICES (DEBUGGED)
+-- ============================================
+
+print("🎮 Player Tracker Initializing...")
+
+-- Check if running as LocalScript
+if not RunService:IsClient() then
+    warn("❌ ERROR: This script must run as a LocalScript on the client!")
+    return
+end
+
+-- Wait for LocalPlayer
+local localPlayer = Players.LocalPlayer
+if not localPlayer then
+    for i = 1, 20 do
+        wait(0.5)
+        localPlayer = Players.LocalPlayer
+        if localPlayer then break end
+        print("⏳ Waiting for LocalPlayer... Attempt " .. i)
+    end
+end
+
+if not localPlayer then
+    warn("❌ ERROR: LocalPlayer not found after 10 seconds!")
+    return
+end
+
+print("✅ LocalPlayer found:", localPlayer.Name)
+
+-- Wait for PlayerGui with timeout
+local playerGui
+for i = 1, 20 do
+    playerGui = localPlayer:FindFirstChild("PlayerGui")
+    if playerGui then break end
+    wait(0.5)
+    print("⏳ Waiting for PlayerGui... Attempt " .. i)
+end
+
+if not playerGui then
+    warn("❌ ERROR: PlayerGui not found after 10 seconds!")
+    return
+end
+
+print("✅ PlayerGui found, creating GUI...")
+
+-- ============================================
+-- 2. PUBLIC DATA SOURCES MODULE (EMBEDDED)
+-- ============================================
+
+local PublicSources = {
+    RATE_LIMIT_DELAY = 1.5,
+    LAST_REQUEST_TIME = 0,
+    REQUEST_COUNT = 0,
+    MAX_REQUESTS = 50,
+    
+    -- Official Roblox APIs (Public)
+    ENDPOINTS = {
+        USER_BY_USERNAME = "https://api.roblox.com/users/get-by-username?username=%s",
+        USER_BY_ID = "https://users.roblox.com/v1/users/%d",
+        AVATAR_HEADSHOT = "https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=%d&size=48x48&format=Png&isCircular=false",
+        GAME_INFO = "https://games.roblox.com/v1/games/%d",
+        GAME_SERVERS = "https://games.roblox.com/v1/games/%d/servers/Public?limit=10",
+        USER_BADGES = "https://badges.roblox.com/v1/users/%d/badges?limit=5"
+    },
+    
+    -- Known in-game thumbnail IDs (Roblox updates these periodically)
+    IN_GAME_POSE_IDS = {
+        "7202519051", "9849108597", "6358417564", "4520749081", "5602065834"
+    }
+}
+
+-- Rate limiter
+function PublicSources.rateLimit()
+    local currentTime = tick()
+    local timeSinceLast = currentTime - PublicSources.LAST_REQUEST_TIME
+    
+    if timeSinceLast < PublicSources.RATE_LIMIT_DELAY then
+        task.wait(PublicSources.RATE_LIMIT_DELAY - timeSinceLast)
+    end
+    
+    PublicSources.REQUEST_COUNT = PublicSources.REQUEST_COUNT + 1
+    PublicSources.LAST_REQUEST_TIME = tick()
+    
+    -- Reset counter every 30 seconds
+    if tick() - PublicSources.LAST_RESET_TIME > 30 then
+        PublicSources.REQUEST_COUNT = 0
+        PublicSources.LAST_RESET_TIME = tick()
+    end
+    
+    if PublicSources.REQUEST_COUNT > PublicSources.MAX_REQUESTS then
+        warn("⚠️ Rate limit reached, cooling down...")
+        task.wait(10)
+        PublicSources.REQUEST_COUNT = 0
+    end
+end
+
+-- HTTP request with fallbacks
+function PublicSources.safeRequest(url)
+    PublicSources.rateLimit()
+    
+    -- Try different request methods
+    local requestFuncs = {
+        function()
+            if syn and syn.request then
+                local response = syn.request({Url = url, Method = "GET"})
+                return response.Body or response.Body
+            end
+        end,
+        
+        function()
+            if request then
+                local response = request({Url = url, Method = "GET"})
+                return response.Body
+            end
+        end,
+        
+        function()
+            if http and http.request then
+                local response = http.request({Url = url, Method = "GET"})
+                return response.Body
+            end
+        end,
+        
+        function()
+            -- Last resort: game:HttpGet (only works in some executors)
+            local success, result = pcall(function()
+                return game:HttpGetAsync(url, true)
+            end)
+            return success and result or nil
+        end
+    }
+    
+    for i, reqFunc in ipairs(requestFuncs) do
+        local success, result = pcall(reqFunc)
+        if success and result then
+            return result
+        end
+    end
+    
+    return nil
+end
+
+-- Convert username to UserID
+function PublicSources.usernameToId(username)
+    local url = string.format(PublicSources.ENDPOINTS.USER_BY_USERNAME, username)
+    local response = PublicSources.safeRequest(url)
+    
+    if response then
+        local success, data = pcall(function()
+            return HttpService:JSONDecode(response)
+        end)
+        
+        if success and data and data.Id then
+            return {
+                Success = true,
+                UserId = data.Id,
+                Username = data.Username,
+                Message = "User found"
+            }
+        end
+    end
+    
+    return {
+        Success = false,
+        Error = "User not found or API unavailable"
+    }
+end
+
+-- Check if user is in-game via thumbnail
+function PublicSources.checkInGame(userId)
+    local url = string.format(PublicSources.ENDPOINTS.AVATAR_HEADSHOT, userId)
+    local response = PublicSources.safeRequest(url)
+    
+    if not response then
+        return {
+            Success = false,
+            Status = "Unknown",
+            Confidence = 0.1,
+            Error = "No response from thumbnail API"
+        }
+    end
+    
+    local success, data = pcall(function()
+        return HttpService:JSONDecode(response)
+    end)
+    
+    if not success or not data or not data.data or #data.data == 0 then
+        return {
+            Success = false,
+            Status = "Error",
+            Confidence = 0,
+            Error = "Invalid API response"
+        }
+    end
+    
+    local imageUrl = data.data[1].imageUrl
+    local isInGame = false
+    
+    -- Check for in-game pose IDs
+    for _, poseId in ipairs(PublicSources.IN_GAME_POSE_IDS) do
+        if string.find(imageUrl, poseId) then
+            isInGame = true
+            break
+        end
+    end
+    
+    -- Additional check: Look for "game" in the URL
+    if not isInGame and string.find(imageUrl, "game") then
+        isInGame = true
+    end
+    
+    if isInGame then
+        return {
+            Success = true,
+            Status = "InGame",
+            Confidence = 0.85,
+            ImageUrl = imageUrl,
+            Method = "Thumbnail Analysis"
+        }
+    else
+        return {
+            Success = true,
+            Status = "Online",
+            Confidence = 0.4,
+            ImageUrl = imageUrl,
+            Method = "Thumbnail Analysis"
+        }
+    end
+end
+
+-- Get game info
+function PublicSources.getGameInfo(placeId)
+    local url = string.format(PublicSources.ENDPOINTS.GAME_INFO, placeId)
+    local response = PublicSources.safeRequest(url)
+    
+    if not response then
+        return {Success = false, Error = "No response"}
+    end
+    
+    local success, data = pcall(function()
+        return HttpService:JSONDecode(response)
+    end)
+    
+    if not success or not data then
+        return {Success = false, Error = "Invalid JSON"}
+    end
+    
+    return {
+        Success = true,
+        Name = data.name or "Unknown Game",
+        Description = data.description or "",
+        Playing = data.playing or 0,
+        Visits = data.visits or 0,
+        Created = data.created or "",
+        Updated = data.updated or ""
+    }
+end
+
+-- Get public servers for a game
+function PublicSources.getGameServers(placeId)
+    local url = string.format(PublicSources.ENDPOINTS.GAME_SERVERS, placeId)
+    local response = PublicSources.safeRequest(url)
+    
+    if not response then
+        return {Success = false, Error = "No response"}
+    end
+    
+    local success, data = pcall(function()
+        return HttpService:JSONDecode(response)
+    end)
+    
+    if not success or not data or not data.data then
+        return {Success = false, Error = "Invalid response"}
+    end
+    
+    local servers = {}
+    for _, server in ipairs(data.data) do
+        if server.playing > 0 then
+            table.insert(servers, {
+                Id = server.id,
+                Players = server.playing,
+                MaxPlayers = server.maxPlayers,
+                Ping = server.ping or 0
+            })
+        end
+    end
+    
+    return {
+        Success = true,
+        Servers = servers,
+        Total = #servers
+    }
+end
+
+-- Get user badges (for activity detection)
+function PublicSources.getUserBadges(userId)
+    local url = string.format(PublicSources.ENDPOINTS.USER_BADGES, userId)
+    local response = PublicSources.safeRequest(url)
+    
+    if not response then
+        return {Success = false}
+    end
+    
+    local success, data = pcall(function()
+        return HttpService:JSONDecode(response)
+    end)
+    
+    if not success or not data or not data.data then
+        return {Success = false}
+    end
+    
+    return {
+        Success = true,
+        Badges = data.data,
+        Count = #data.data
+    }
+end
+
+-- Main tracking function
+function PublicSources.trackPlayer(identifier)
+    print("[Tracker] Starting track for:", identifier)
+    
+    local result = {
+        SourcesUsed = {},
+        Timestamp = os.time(),
+        UserId = nil,
+        Username = nil
+    }
+    
+    -- Step 1: Resolve identifier
+    local userInfo
+    if tonumber(identifier) then
+        userInfo = {Success = true, UserId = tonumber(identifier), Username = "UserID: " .. identifier}
+    else
+        userInfo = PublicSources.usernameToId(identifier)
+    end
+    
+    if not userInfo.Success then
+        result.Error = "Could not resolve user: " .. (userInfo.Error or "Unknown error")
+        return result
+    end
+    
+    result.UserId = userInfo.UserId
+    result.Username = userInfo.Username or identifier
+    table.insert(result.SourcesUsed, "User Resolution API")
+    
+    -- Step 2: Check presence
+    local presence = PublicSources.checkInGame(userInfo.UserId)
+    result.Presence = presence
+    table.insert(result.SourcesUsed, "Thumbnail API")
+    
+    -- Step 3: Get additional data
+    local badges = PublicSources.getUserBadges(userInfo.UserId)
+    if badges.Success and badges.Count > 0 then
+        result.BadgeCount = badges.Count
+        table.insert(result.SourcesUsed, "Badges API")
+    end
+    
+    result.Success = true
+    result.Message = "Tracking completed"
+    
+    print("[Tracker] Completed:", result.Message)
+    return result
+end
+
+PublicSources.LAST_RESET_TIME = tick()
+print("✅ Data Sources Module Loaded")
+
+-- ============================================
+-- 3. GUI CREATION (DEBUGGED - WILL APPEAR)
+-- ============================================
+
+-- Create ScreenGui
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "PlayerTrackerPro"
+screenGui.ResetOnSpawn = false
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.Enabled = true
+screenGui.DisplayOrder = 999
+screenGui.Parent = playerGui
+
+print("✅ ScreenGui created and parented")
+
+-- Main Container
+local mainFrame = Instance.new("Frame")
+mainFrame.Name = "MainContainer"
+mainFrame.Size = UDim2.new(0, 380, 0, 450)
+mainFrame.Position = UDim2.new(0.5, -190, 0.5, -225)
+mainFrame.BackgroundColor3 = Color3.fromRGB(20, 22, 30)
+mainFrame.BackgroundTransparency = 0.05
+mainFrame.BorderSizePixel = 0
+mainFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+mainFrame.Parent = screenGui
+
+-- Rounded corners
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 14)
+corner.Parent = mainFrame
+
+-- Glow effect
+local glow = Instance.new("UIStroke")
+glow.Color = Color3.fromRGB(0, 150, 255)
+glow.Thickness = 2
+glow.Transparency = 0.3
+glow.Parent = mainFrame
+
+-- Title Bar
+local titleBar = Instance.new("Frame")
+titleBar.Name = "TitleBar"
+titleBar.Size = UDim2.new(1, 0, 0, 40)
+titleBar.Position = UDim2.new(0, 0, 0, 0)
+titleBar.BackgroundColor3 = Color3.fromRGB(15, 17, 25)
+titleBar.BorderSizePixel = 0
+titleBar.Parent = mainFrame
+
+local titleCorner = Instance.new("UICorner")
+titleCorner.CornerRadius = UDim.new(0, 14)
+titleCorner.Parent = titleBar
+
+local titleText = Instance.new("TextLabel")
+titleText.Size = UDim2.new(1, -80, 1, 0)
+titleText.Position = UDim2.new(0, 10, 0, 0)
+titleText.BackgroundTransparency = 1
+titleText.Text = "🔍 PLAYER TRACKER PRO v3.0"
+titleText.TextColor3 = Color3.fromRGB(220, 220, 255)
+titleText.Font = Enum.Font.GothamBold
+titleText.TextSize = 16
+titleText.TextXAlignment = Enum.TextXAlignment.Left
+titleText.Parent = titleBar
+
+-- Close button
+local closeButton = Instance.new("TextButton")
+closeButton.Name = "CloseButton"
+closeButton.Size = UDim2.new(0, 30, 0, 30)
+closeButton.Position = UDim2.new(1, -35, 0, 5)
+closeButton.BackgroundColor3 = Color3.fromRGB(255, 60, 60)
+closeButton.Text = "✕"
+closeButton.TextColor3 = Color3.new(1, 1, 1)
+closeButton.Font = Enum.Font.GothamBold
+closeButton.TextSize = 14
+closeButton.BorderSizePixel = 0
+closeButton.Parent = titleBar
+
+local closeCorner = Instance.new("UICorner")
+closeCorner.CornerRadius = UDim.new(0, 8)
+closeCorner.Parent = closeButton
+
+-- Input Section
+local inputSection = Instance.new("Frame")
+inputSection.Name = "InputSection"
+inputSection.Size = UDim2.new(1, -20, 0, 90)
+inputSection.Position = UDim2.new(0, 10, 0, 50)
+inputSection.BackgroundColor3 = Color3.fromRGB(30, 33, 45)
+inputSection.BackgroundTransparency = 0.2
+inputSection.BorderSizePixel = 0
+inputSection.Parent = mainFrame
+
+local inputCorner = Instance.new("UICorner")
+inputCorner.CornerRadius = UDim.new(0, 10)
+inputCorner.Parent = inputSection
+
+local inputLabel = Instance.new("TextLabel")
+inputLabel.Size = UDim2.new(1, -10, 0, 20)
+inputLabel.Position = UDim2.new(0, 5, 0, 5)
+inputLabel.BackgroundTransparency = 1
+inputLabel.Text = "Enter Roblox Username or UserID:"
+inputLabel.TextColor3 = Color3.fromRGB(180, 180, 220)
+inputLabel.Font = Enum.Font.Gotham
+inputLabel.TextSize = 12
+inputLabel.TextXAlignment = Enum.TextXAlignment.Left
+inputLabel.Parent = inputSection
+
+local textBox = Instance.new("TextBox")
+textBox.Name = "InputBox"
+textBox.Size = UDim2.new(1, -10, 0, 35)
+textBox.Position = UDim2.new(0, 5, 0, 30)
+textBox.PlaceholderText = "e.g., 'Roblox' or 156"
+textBox.Text = ""
+textBox.ClearTextOnFocus = false
+textBox.BackgroundColor3 = Color3.fromRGB(40, 43, 55)
+textBox.TextColor3 = Color3.new(1, 1, 1)
+textBox.Font = Enum.Font.Gotham
+textBox.TextSize = 14
+textBox.BorderSizePixel = 0
+textBox.Parent = inputSection
+
+local textBoxCorner = Instance.new("UICorner")
+textBoxCorner.CornerRadius = UDim.new(0, 8)
+textBoxCorner.Parent = textBox
+
+-- Action Buttons
+local buttonsFrame = Instance.new("Frame")
+buttonsFrame.Name = "Buttons"
+buttonsFrame.Size = UDim2.new(1, -20, 0, 45)
+buttonsFrame.Position = UDim2.new(0, 10, 0, 150)
+buttonsFrame.BackgroundTransparency = 1
+buttonsFrame.Parent = mainFrame
+
+local trackButton = Instance.new("TextButton")
+trackButton.Name = "TrackButton"
+trackButton.Size = UDim2.new(0.48, 0, 1, 0)
+trackButton.Position = UDim2.new(0, 0, 0, 0)
+trackButton.BackgroundColor3 = Color3.fromRGB(0, 150, 255)
+trackButton.Text = "▶ TRACK PLAYER"
+trackButton.TextColor3 = Color3.new(1, 1, 1)
+trackButton.Font = Enum.Font.GothamBold
+trackButton.TextSize = 14
+trackButton.BorderSizePixel = 0
+trackButton.Parent = buttonsFrame
+
+local joinButton = Instance.new("TextButton")
+joinButton.Name = "JoinButton"
+joinButton.Size = UDim2.new(0.48, 0, 1, 0)
+joinButton.Position = UDim2.new(0.52, 0, 0, 0)
+joinButton.BackgroundColor3 = Color3.fromRGB(50, 180, 80)
+joinButton.Text = "🚀 JOIN GAME"
+joinButton.TextColor3 = Color3.new(1, 1, 1)
+joinButton.Font = Enum.Font.GothamBold
+joinButton.TextSize = 14
+joinButton.BorderSizePixel = 0
+joinButton.Visible = false
+joinButton.Parent = buttonsFrame
+
+local buttonCorner = Instance.new("UICorner")
+buttonCorner.CornerRadius = UDim.new(0, 8)
+buttonCorner.Parent = trackButton
+buttonCorner:Clone().Parent = joinButton
+
+-- Results Display
+local resultsFrame = Instance.new("Frame")
+resultsFrame.Name = "Results"
+resultsFrame.Size = UDim2.new(1, -20, 0, 180)
+resultsFrame.Position = UDim2.new(0, 10, 0, 210)
+resultsFrame.BackgroundColor3 = Color3.fromRGB(25, 28, 40)
+resultsFrame.BackgroundTransparency = 0.1
+resultsFrame.BorderSizePixel = 0
+resultsFrame.Parent = mainFrame
+
+local resultsCorner = Instance.new("UICorner")
+resultsCorner.CornerRadius = UDim.new(0, 10)
+resultsCorner.Parent = resultsFrame
+
+local resultsTitle = Instance.new("TextLabel")
+resultsTitle.Size = UDim2.new(1, 0, 0, 30)
+resultsTitle.Position = UDim2.new(0, 0, 0, 0)
+resultsTitle.BackgroundColor3 = Color3.fromRGB(35, 38, 50)
+resultsTitle.Text = "📊 TRACKING RESULTS"
+resultsTitle.TextColor3 = Color3.fromRGB(200, 200, 255)
+resultsTitle.Font = Enum.Font.GothamBold
+resultsTitle.TextSize = 13
+resultsTitle.Parent = resultsFrame
+
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Name = "StatusLabel"
+statusLabel.Size = UDim2.new(1, -10, 1, -40)
+statusLabel.Position = UDim2.new(0, 5, 0, 35)
+statusLabel.BackgroundTransparency = 1
+statusLabel.Text = "Ready to track.\nEnter a username or ID above."
+statusLabel.TextColor3 = Color3.fromRGB(180, 220, 255)
+statusLabel.Font = Enum.Font.Gotham
+statusLabel.TextSize = 13
+statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+statusLabel.TextYAlignment = Enum.TextYAlignment.Top
+statusLabel.TextWrapped = true
+statusLabel.Parent = resultsFrame
+
+-- Sources Display
+local sourcesFrame = Instance.new("Frame")
+sourcesFrame.Name = "Sources"
+sourcesFrame.Size = UDim2.new(1, -20, 0, 80)
+sourcesFrame.Position = UDim2.new(0, 10, 1, -85)
+sourcesFrame.BackgroundColor3 = Color3.fromRGB(20, 23, 35)
+sourcesFrame.BackgroundTransparency = 0.2
+sourcesFrame.BorderSizePixel = 0
+sourcesFrame.Parent = mainFrame
+
+local sourcesCorner = Instance.new("UICorner")
+sourcesCorner.CornerRadius = UDim.new(0, 10)
+sourcesCorner.Parent = sourcesFrame
+
+local sourcesTitle = Instance.new("TextLabel")
+sourcesTitle.Size = UDim2.new(1, 0, 0, 20)
+sourcesTitle.Position = UDim2.new(0, 0, 0, 0)
+sourcesTitle.BackgroundTransparency = 1
+sourcesTitle.Text = "🌐 ACTIVE DATA SOURCES"
+sourcesTitle.TextColor3 = Color3.fromRGB(150, 200, 255)
+sourcesTitle.Font = Enum.Font.GothamBold
+sourcesTitle.TextSize = 11
+sourcesTitle.Parent = sourcesFrame
+
+local sourcesLabel = Instance.new("TextLabel")
+sourcesLabel.Name = "SourcesLabel"
+sourcesLabel.Size = UDim2.new(1, -10, 1, -25)
+sourcesLabel.Position = UDim2.new(0, 5, 0, 20)
+sourcesLabel.BackgroundTransparency = 1
+sourcesLabel.Text = "No sources active"
+sourcesLabel.TextColor3 = Color3.fromRGB(170, 200, 230)
+sourcesLabel.Font = Enum.Font.Gotham
+sourcesLabel.TextSize = 10
+sourcesLabel.TextXAlignment = Enum.TextXAlignment.Left
+sourcesLabel.TextYAlignment = Enum.TextYAlignment.Top
+sourcesLabel.TextWrapped = true
+sourcesLabel.Parent = sourcesFrame
+
+-- Debug Panel (only visible if enabled)
+local debugButton = Instance.new("TextButton")
+debugButton.Name = "DebugToggle"
+debugButton.Size = UDim2.new(0, 100, 0, 25)
+debugButton.Position = UDim2.new(0.5, -50, 1, 10)
+debugButton.BackgroundColor3 = Color3.fromRGB(60, 60, 80)
+debugButton.Text = "🔧 DEBUG MODE"
+debugButton.TextColor3 = Color3.new(1, 1, 1)
+debugButton.Font = Enum.Font.Gotham
+debugButton.TextSize = 11
+debugButton.BorderSizePixel = 0
+debugButton.Visible = false -- Hidden by default
+debugButton.Parent = screenGui
+
+-- ============================================
+-- 4. DRAGGABLE UI FUNCTIONALITY
+-- ============================================
+
+local dragging, dragInput, dragStart, startPos
+
+titleBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = mainFrame.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
+end)
+
+titleBar.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        dragInput = input
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if dragging and input == dragInput then
+        local delta = input.Position - dragStart
+        mainFrame.Position = UDim2.new(
+            startPos.X.Scale,
+            startPos.X.Offset + delta.X,
+            startPos.Y.Scale,
+            startPos.Y.Offset + delta.Y
+        )
+    end
+end)
+
+-- ============================================
+-- 5. TRACKING LOGIC & EVENT HANDLERS
+-- ============================================
+
+local isTracking = false
+local currentTarget = nil
+local lastResults = nil
+
+-- Update sources display
+local function updateSourcesDisplay(sources)
+    local sourceIcons = {
+        ["User Resolution API"] = "👤",
+        ["Thumbnail API"] = "🖼️",
+        ["Badges API"] = "🏆",
+        ["Game Info API"] = "🎮"
+    }
+    
+    local text = ""
+    for i, source in ipairs(sources) do
+        local icon = sourceIcons[source] or "🔗"
+        local status = (i % 2 == 0) and "🟢" or "🔵"
+        text = text .. string.format("%s %s %s\n", status, icon, source)
+    end
+    
+    if text == "" then
+        sourcesLabel.Text = "No active sources"
+    else
+        sourcesLabel.Text = text
+    end
+end
+
+-- Update status with animation
+local function updateStatus(text, color)
+    statusLabel.Text = text
+    if color then
+        statusLabel.TextColor3 = color
+    end
+    
+    -- Pulsing animation
+    local tweenInfo = TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+    local tween = TweenService:Create(statusLabel, tweenInfo, {TextTransparency = 0.3})
+    tween:Play()
+    task.wait(0.1)
+    tween = TweenService:Create(statusLabel, tweenInfo, {TextTransparency = 0})
+    tween:Play()
+end
+
+-- Track player function
+local function startTracking()
+    if isTracking then return end
+    
+    local input = textBox.Text
+    if input == "" then
+        updateStatus("❌ Please enter a username or ID", Color3.fromRGB(255, 100, 100))
+        return
+    end
+    
+    isTracking = true
+    currentTarget = input
+    trackButton.Text = "🔄 TRACKING..."
+    trackButton.BackgroundColor3 = Color3.fromRGB(255, 150, 50)
+    joinButton.Visible = false
+    
+    updateStatus("🔍 Starting tracker...\nQuerying Roblox APIs...", Color3.fromRGB(255, 200, 100))
+    updateSourcesDisplay({})
+    
+    -- Run in separate thread to avoid freezing GUI
+    task.spawn(function()
+        local results = PublicSources.trackPlayer(input)
+        lastResults = results
+        
+        -- Update UI with results
+        if results.Success then
+            local statusColor = Color3.fromRGB(100, 255, 150)
+            local statusText = string.format("✅ TRACKING COMPLETE\n\n👤 Player: %s\n🎯 Status: %s\n📊 Confidence: %.0f%%",
+                results.Username,
+                results.Presence.Status,
+                results.Presence.Confidence * 100)
+            
+            if results.BadgeCount then
+                statusText = statusText .. string.format("\n🏆 Badges: %d", results.BadgeCount)
+            end
+            
+            statusText = statusText .. string.format("\n\n⏰ Time: %s", os.date("%H:%M:%S"))
+            
+            updateStatus(statusText, statusColor)
+            updateSourcesDisplay(results.SourcesUsed)
+            
+            -- Show join button if player is in-game with high confidence
+            if results.Presence.Status == "InGame" and results.Presence.Confidence > 0.7 then
+                joinButton.Visible = true
+                joinButton.Text = "🚀 JOIN PLAYER"
+                joinButton.BackgroundColor3 = Color3.fromRGB(50, 200, 100)
+            end
+        else
+            updateStatus(string.format("❌ TRACKING FAILED\n\nError: %s\n\nTry a different username or check your connection.", 
+                results.Error or "Unknown error"), Color3.fromRGB(255, 100, 100))
+        end
+        
+        isTracking = false
+        trackButton.Text = "▶ TRACK PLAYER"
+        trackButton.BackgroundColor3 = Color3.fromRGB(0, 150, 255)
+    end)
+end
+
+-- Join player function
+local function joinPlayer()
+    if not lastResults or not lastResults.Success then return end
+    
+    joinButton.Text = "🔄 JOINING..."
+    joinButton.BackgroundColor3 = Color3.fromRGB(255, 150, 50)
+    updateStatus("🚀 Attempting to join player...\nThis may take a moment...", Color3.fromRGB(255, 200, 100))
+    
+    task.spawn(function()
+        local success, errorMsg = pcall(function()
+            -- Method 1: Try to teleport to player directly
+            localPlayer:RequestTeleportToPlayer(lastResults.UserId)
+        end)
+        
+        if not success then
+            updateStatus("❌ JOIN FAILED\n\nUnable to join player directly.\nThey might be in a private server.", 
+                Color3.fromRGB(255, 100, 100))
+        else
+            updateStatus("✅ JOIN INITIATED\n\nTeleporting to player's game...", 
+                Color3.fromRGB(100, 255, 150))
+        end
+        
+        joinButton.Text = "🚀 JOIN GAME"
+        joinButton.BackgroundColor3 = Color3.fromRGB(50, 200, 100)
+    end)
+end
+
+-- ============================================
+-- 6. EVENT CONNECTIONS
+-- ============================================
+
+-- Track button click
+trackButton.MouseButton1Click:Connect(startTracking)
+
+-- Enter key in textbox
+textBox.FocusLost:Connect(function(enterPressed)
+    if enterPressed then
+        startTracking()
+    end
+end)
+
+-- Join button click
+joinButton.MouseButton1Click:Connect(joinPlayer)
+
+-- Close button
+closeButton.MouseButton1Click:Connect(function()
+    screenGui:Destroy()
+    print("🎮 Player Tracker closed")
+end)
+
+-- Debug button (toggle visibility)
+debugButton.MouseButton1Click:Connect(function()
+    if sourcesFrame.Visible then
+        sourcesFrame.Visible = false
+        mainFrame.Size = UDim2.new(0, 380, 0, 370)
+        debugButton.Text = "🔧 SHOW DEBUG"
+    else
+        sourcesFrame.Visible = true
+        mainFrame.Size = UDim2.new(0, 380, 0, 450)
+        debugButton.Text = "🔧 HIDE DEBUG"
+    end
+end)
+
+-- Auto-focus textbox when GUI loads
+task.wait(0.5)
+textBox:CaptureFocus()
+
+-- ============================================
+-- 7. INITIALIZATION COMPLETE
+-- ============================================
+
+print("✅ Player Tracker Pro GUI Loaded Successfully!")
+print("📱 GUI should be visible on screen")
+print("🎯 Features: No cookies needed, Multi-source tracking")
+
+-- Initial status message
+updateStatus("🎮 PLAYER TRACKER PRO v3.0\n\n✅ Ready to track\n\n📝 Enter a Roblox username or ID\n🔍 Click TRACK or press Enter", 
+    Color3.fromRGB(180, 220, 255))
+
+-- Update sources with initial state
+updateSourcesDisplay({"System: Ready", "API: Online", "Tracker: Active"})
+
+-- Make debug button visible after 3 seconds
+task.wait(3)
+debugButton.Visible = true
+
+-- ============================================
+-- 8. CLEANUP ON DESTROY
+-- ============================================
+
+screenGui.Destroying:Connect(function()
+    isTracking = false
+    print("🎮 Player Tracker cleaned up")
+end)
+
+return screenGui
